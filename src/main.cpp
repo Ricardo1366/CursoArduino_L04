@@ -6,12 +6,14 @@
 #include <Adafruit_I2CDevice.h>
 #include <RTClib.h>
 #include <OneWire.h>
+#include <DallasTemperature.h>
 
 #define DEBUG
 #define ANCHO_PANTALLA 128 // OLED display width, in pixels
 #define ALTO_PANTALLA 32   // OLED display height, in pixels
 #define PINPULSADOR 4
-#define PIN_TERMOMETRO 2
+#define PIN_TERMOMETRO 5
+#define PIN_INTERRUPCION 2
 // Declaracion para SSD1306 display conectador por I2C (SDA, SCL pins)
 // Los pines I2C están definidos en la biblioteca Wire.
 // Para arduino UNO, Nano:       A4(SDA), A5(SCL)
@@ -20,25 +22,26 @@
 
 // Declaración funciones ///////////////////////////////////////////////////////
 void mostrarPantalla();
+void siguienteLectura();
 
 /////////////////////// Declaración variables //////////////////////////////////
 Adafruit_SSD1306 pantalla(ANCHO_PANTALLA, ALTO_PANTALLA, &Wire, RESET_PANTALLA);
-
 RTC_DS1307 reloj;
 DateTime tiempo;
 OneWire termometro(PIN_TERMOMETRO);
+DallasTemperature lecturaTemperatura(&termometro);
 
 bool pulsado = false;
 bool estadoPulsador;
 bool leerHora = false;
-
+volatile bool lectura;
 char cadenaFormateada[9];
 
 byte datos[9];
 byte termometro_addr[8];
 byte termometro_cfg;
 int16_t temperatura;
-float celsius, fahrenheit;
+float celsius;
 
 void setup()
 {
@@ -46,7 +49,27 @@ void setup()
   Serial.begin(115200);
 #endif
 
-  pinMode(PIN_TERMOMETRO, INPUT);
+  // Inicializamos el reloj.
+  if (!reloj.begin())
+  {
+    // Error inicializando el relor. Entramos en un bucle infinito.
+    pantalla.println(F("Error en DS1307"));
+    pantalla.display();
+    for (;;)
+      ;
+  }
+  else
+  {
+    // Compilamos la fecha y hora del momento de la compilación
+    reloj.adjust(DateTime(F(__DATE__), F(__TIME__)));
+#if defined(DEBUG)
+    Serial.println(F("Reloj funcionando."));
+#endif
+
+    // Configuramos la señal del reloj (SQW) a 1 Hz.
+    reloj.writeSqwPinMode(DS1307_SquareWave1HZ);
+    
+  }
 
   // SSD1306_SWITCHCAPVCC = generate display voltage from 3.3V internally
   if (!pantalla.begin(SSD1306_SWITCHCAPVCC, DIRECCION_PANTALLA))
@@ -79,39 +102,21 @@ void setup()
   pantalla.setCursor(0, 0);             // Situamos el cursor en la parte superior izquierda de la pantalla.
   pantalla.cp437(true);                 // Habilitamos la página de códigos 437
 #if defined(DEBUG)
-  Serial.println(F("Pantalla configurada en modo texto."));
+  Serial.println(F("Pantalla configurada correctamente."));
 #endif
-  // Inicializamos el reloj.
-  if (!reloj.begin())
-  {
-    // Error inicializando el relor. Entramos en un bucle infinito.
-    pantalla.println(F("Error en DS1307"));
-    pantalla.display();
-    while (1)
-      delay(10);
-  }
-  else
-  {
-    // Compilamos la fecha y hora del momento de la compilación
-    reloj.adjust(DateTime(F(__DATE__), F(__TIME__)));
-#if defined(DEBUG)
-    Serial.println(F("Reloj funcionando."));
-#endif
-  }
-
   tiempo = reloj.now();
-// Pantalla bienvenida.
+  // Pantalla bienvenida.
   pantalla.println(F("   Curso"));
   pantalla.println(F("  Arduino"));
   pantalla.display();
-
+  lecturaTemperatura.begin();
   // Buscamos el termómetro y guardamos la dirección.
-  if (!termometro.search(termometro_addr))
+  if (!lecturaTemperatura.getAddress(termometro_addr, 0))
   {
-    Serial.println(F("Termómetro no encontrado."));
-    Serial.println();
-    termometro.reset_search();
-    delay(250);
+    pantalla.println(F("Termómetro Err."));
+    pantalla.display();
+    for (;;)
+      ;
   }
   else
   {
@@ -119,6 +124,8 @@ void setup()
     Serial.println(F("Termómetro OK"));
 #endif
   }
+  // Configuramos la interrupción
+  attachInterrupt(digitalPinToInterrupt(PIN_INTERRUPCION), siguienteLectura, RISING);
 }
 
 void loop()
@@ -140,70 +147,51 @@ void loop()
     {
       leerHora = !leerHora;
       pulsado = true;
-      mostrarPantalla();
     }
+  }
+  if (lectura)
+  {
+    mostrarPantalla();
   }
 }
 
 // Muestra en pantalla la temperatura y la hora de forma alternativa.
 void mostrarPantalla()
 {
+  lectura = false;
   if (leerHora)
   {
     // Mostramos la hora en pantalla
     tiempo = reloj.now();
+
     // Guardamos en un char array la hora formateada como HH:MM:SS
     sprintf(cadenaFormateada, "%02u:%02u:%02u", tiempo.hour(), tiempo.minute(), tiempo.second());
     pantalla.clearDisplay();
     pantalla.setCursor(16, 10);
-    // pantalla.setTextSize(2);
     pantalla.println(cadenaFormateada);
     pantalla.display();
   }
   else
   {
-    // Hay que resetear antes de enviar una orden al termómetro.
-    termometro.reset();
-    // Seleccionamos el termómetro indicando su dirección.
-    termometro.select(termometro_addr);
-    // Enviamos la orden
-    termometro.write(0x44, 1); // start conversion, with parasite power on at the end
+    lecturaTemperatura.requestTemperatures(); // Send the command to get temperatures
 
-    // Lanzamos la lectura de la temperatura.
-    termometro.reset();
-    termometro.select(termometro_addr);
-    termometro.write(0xBE);
-    // Hacemos una pausa antes de leer los datos recibidos.
-    delay(1000);
-    for (byte i = 0; i < 9; i++)
-    { // Leemos 9 bytes
-      datos[i] = termometro.read();
-    }
-
-    // Guardamos en una variable de 16 bits la tempreatura (sin formatear)
-    temperatura = (datos[1] << 8) | datos[0];
-    // Este byte nos indica los bit de resolución.
-    termometro_cfg = (datos[4] & 0x60);
-
-    if (termometro_cfg == 0x00)
-      temperatura = temperatura & ~7; // 9 bit resolution, 93.75 ms
-    else if (termometro_cfg == 0x20)
-      temperatura = temperatura & ~3; // 10 bit res, 187.5 ms
-    else if (termometro_cfg == 0x40)
-      temperatura = temperatura & ~1; // 11 bit res, 375 ms
-
-    // Cálculamos la temperatura en grados celsius.
-    celsius = (float)temperatura / 16.0;
+    celsius = lecturaTemperatura.getTempCByIndex(0);
     pantalla.clearDisplay();
     pantalla.setCursor(16, 10);
     pantalla.print(celsius);
-    
+
     // Símbolo º
-    pantalla.setCursor(76,6);
+    pantalla.setCursor(76, 6);
     pantalla.write(9);
 
-    pantalla.setCursor(93,10);
+    pantalla.setCursor(93, 10);
     pantalla.print("C");
     pantalla.display();
   }
+}
+
+// Activamos la orden para la siguiente lectura.
+void siguienteLectura()
+{
+  lectura = true;
 }
