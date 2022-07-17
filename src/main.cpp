@@ -12,8 +12,8 @@
 #define ANCHO_PANTALLA 128 // OLED display width, in pixels
 #define ALTO_PANTALLA 32   // OLED display height, in pixels
 #define PINPULSADOR 4
-#define PIN_TERMOMETRO 5
-#define PIN_INTERRUPCION 2
+#define PIN_TERMOMETRO DD5
+#define PIN_INTERRUPCION DD2
 // Declaracion para SSD1306 display conectador por I2C (SDA, SCL pins)
 // Los pines I2C están definidos en la biblioteca Wire.
 // Para arduino UNO, Nano:       A4(SDA), A5(SCL)
@@ -111,12 +111,10 @@ void setup()
   pantalla.display();
   lecturaTemperatura.begin();
   // Buscamos el termómetro y guardamos la dirección.
-  if (!lecturaTemperatura.getAddress(termometro_addr, 0))
+  if (lecturaTemperatura.getDeviceCount() < 1)
   {
-    pantalla.println(F("Termómetro Err."));
+    pantalla.println(F("No se ha encontrado ningún termómetro."));
     pantalla.display();
-    for (;;)
-      ;
   }
   else
   {
@@ -124,6 +122,7 @@ void setup()
     Serial.println(F("Termómetro OK"));
 #endif
   }
+  pinMode(PIN_INTERRUPCION, INPUT_PULLUP);
   // Configuramos la interrupción
   attachInterrupt(digitalPinToInterrupt(PIN_INTERRUPCION), siguienteLectura, RISING);
 }
@@ -132,6 +131,7 @@ void loop()
 {
   // Leemos el estado del pulsador
   estadoPulsador = !digitalRead(PINPULSADOR);
+
   if (pulsado)
   {
     // En la anterior lectura estaba pulsado. Comprobamos si se ha soltado.
